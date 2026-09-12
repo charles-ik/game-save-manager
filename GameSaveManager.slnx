@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/GameSaveManager.Contracts/GameSaveManager.Contracts.csproj" />
+    <Project Path="src/GameSaveManager.Core/GameSaveManager.Core.csproj" />
+    <Project Path="src/GameSaveManager.App/GameSaveManager.App.csproj" />
+    <Project Path="src/GameSaveManager.Playnite/GameSaveManager.Playnite.csproj" />
+  </Folder>
+  <Folder Name="/tests/"><Project Path="tests/GameSaveManager.Tests/GameSaveManager.Tests.csproj" /><Project Path="tests/GameSaveManager.Playnite.Tests/GameSaveManager.Playnite.Tests.csproj" /></Folder>
+</Solution>
