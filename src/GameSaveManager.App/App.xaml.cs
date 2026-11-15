@@ -16,8 +16,11 @@ public partial class App : System.Windows.Application
     {
         base.OnStartup(e);
         var smoke = e.Args.Contains("--smoke-test");
-        instance = new Mutex(true, "Local\\" + PlayniteBridge.PipeName, out var created);
-        if (!created) { Shutdown(); return; }
+        // The smoke test uses its own state directory and no bridge, so it may run beside the real app.
+        var created = true; if (!smoke) instance = new Mutex(true, "Local\\" + PlayniteBridge.PipeName, out created);
+        var show = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\" + PlayniteBridge.PipeName + "-show");
+        // Opening the app again brings the running copy's window forward instead of silently doing nothing.
+        if (!created) { if (e.Args.Length == 0) show.Set(); Shutdown(); return; }
         var stateArgument = Array.IndexOf(e.Args, "--state-dir");
         var state = stateArgument >= 0 && stateArgument + 1 < e.Args.Length ? e.Args[stateArgument + 1] : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GameSaveManager");
         Controller = new(state);
@@ -55,10 +58,12 @@ public partial class App : System.Windows.Application
         }
         tray = new() { Icon = System.Drawing.SystemIcons.Application, Text = "Game Save Manager", Visible = true };
         var menu = new System.Windows.Forms.ContextMenuStrip();
-        menu.Items.Add("Open Game Save Manager", null, (_, _) => Dispatcher.Invoke(() => { window.Show(); window.Activate(); }));
+        void Surface() => Dispatcher.Invoke(() => { window.Show(); if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal; window.Activate(); });
+        ThreadPool.RegisterWaitForSingleObject(show, (_, _) => Surface(), null, Timeout.Infinite, false);
+        menu.Items.Add("Open Game Save Manager", null, (_, _) => Surface());
         menu.Items.Add("Back up now", null, (_, _) => Dispatcher.Invoke(async () => await window.RunAsync(async () => { await Controller.BackupAsync(); })));
         menu.Items.Add("Exit", null, (_, _) => Dispatcher.Invoke(() => { Exiting = true; Shutdown(); }));
-        tray.ContextMenuStrip = menu; tray.DoubleClick += (_, _) => Dispatcher.Invoke(() => { window.Show(); window.Activate(); });
+        tray.ContextMenuStrip = menu; tray.DoubleClick += (_, _) => Surface();
         Controller.NeedsAttention += message => Dispatcher.Invoke(() => tray.ShowBalloonTip(5000, "Game Save Manager needs attention", message, System.Windows.Forms.ToolTipIcon.Warning));
         Controller.Start();
         if (!e.Args.Contains("--tray")) window.Show();

@@ -44,6 +44,7 @@ public sealed class MigrationService(AppController app)
         if (saves.Any(x => x.Status == "Failed" || x.Status == "Deferred" && x.Name != "Account-wide discovery")) throw new InvalidOperationException("Some saves were deferred or failed. Close games and complete their backups before preparing a migration.");
         return await app.Exclusive(async () =>
         {
+            if (ct == default) ct = app.OperationToken;
             var versions = await app.Engine.VersionsAsync(app.Backups.Repository, ct);
             foreach (var newest in versions.GroupBy(x => x.Game).Select(x => x.First())) await app.Backups.PinAsync(app.Backups.Repository, newest, true, ct);
             var package = await BackupPlayniteAsync(true, ct);

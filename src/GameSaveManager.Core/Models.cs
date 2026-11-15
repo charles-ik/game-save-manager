@@ -32,8 +32,14 @@ public sealed class GameInstallation
     public string? SaveTitle { get; set; }
     public bool Confirmed { get; set; }
     public bool Excluded { get; set; }
+    /// <summary>Removed by the user: excluded from everything and hidden. Kept so a scan does not rediscover it.</summary>
+    public bool Removed { get; set; }
+    /// <summary>Ask Playnite to download this game's metadata on its next check-in.</summary>
+    public bool MetadataWanted { get; set; }
     public bool Present { get; set; } = true;
     public DateTimeOffset LastChangeUtc { get; set; }
+    /// <summary>Display only: this game's row from the Backups list.</summary>
+    [System.Text.Json.Serialization.JsonIgnore] public string SaveStatus { get; set; } = "";
 }
 
 public sealed class SaveRule

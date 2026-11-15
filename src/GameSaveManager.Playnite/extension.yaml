@@ -1,7 +1,7 @@
 Id: GameSaveManager_03f6c998-5c32-4e62-9e76-5eaa9c1cf687
 Name: Game Save Manager Companion
 Author: Game Save Manager
-Version: 0.1.0
+Version: 0.2.0
 Module: GameSaveManager.Playnite.dll
 Type: GenericPlugin
 Description: Connects Game Save Manager to your Playnite library for imports and game lifecycle events.

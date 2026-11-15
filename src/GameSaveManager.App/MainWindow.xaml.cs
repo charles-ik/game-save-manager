@@ -1,8 +1,10 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using GameSaveManager.Core;
@@ -16,7 +18,8 @@ public partial class MainWindow : Window
     private readonly AppController app;
     private string? previewJson;
     private string? previewIdentity;
-    private bool busy;
+    private bool busy, refreshing;
+    private const string AllStatuses = "All statuses";
     public MainWindow(AppController controller)
     {
         InitializeComponent(); app = controller;
@@ -29,26 +32,54 @@ public partial class MainWindow : Window
         Closing += (_, e) => { if (!((App)System.Windows.Application.Current).Exiting) { e.Cancel = true; Hide(); } };
         Refresh();
     }
+    private void Filter_Changed(object sender, RoutedEventArgs e) { if (app != null && !refreshing) Refresh(); }
+    /// <summary>Shows rows in a grid, keeping the user's column sort and selected rows and applying the search box and status filter.</summary>
+    private static void Show<T>(DataGrid grid, List<T> rows, Func<T, string> key, TextBox search, ComboBox? status, Func<T, string> text, Func<T, IEnumerable<string>> states, Func<T, bool>? hidden = null)
+    {
+        // Background refreshes (Playnite polls every few seconds) must not drop the rows the user has selected.
+        var selected = grid.SelectedItems.OfType<T>().Select(key).ToHashSet();
+        var sorts = grid.Items.SortDescriptions.ToList(); var chosen = status?.SelectedItem as string ?? AllStatuses;
+        if (status != null) { status.ItemsSource = rows.SelectMany(states).Where(x => !x.EndsWith(": ", StringComparison.Ordinal)).Distinct().Order().Prepend(AllStatuses).ToList(); status.SelectedItem = ((List<string>)status.ItemsSource).Contains(chosen) ? chosen : chosen = AllStatuses; }
+        grid.ItemsSource = rows;
+        foreach (var sort in sorts) grid.Items.SortDescriptions.Add(sort);
+        foreach (var column in grid.Columns) column.SortDirection = sorts.Where(x => x.PropertyName == column.SortMemberPath).Select(x => (System.ComponentModel.ListSortDirection?)x.Direction).FirstOrDefault();
+        var words = search.Text.Trim();
+        // Hidden rows (removed games) appear only when their own status is picked in the filter.
+        grid.Items.Filter = row => (chosen == AllStatuses ? hidden?.Invoke((T)row) != true : states((T)row).Contains(chosen)) && text((T)row).Contains(words, StringComparison.OrdinalIgnoreCase);
+        foreach (var row in rows.Where(x => selected.Contains(key(x)) && grid.Items.Contains(x))) grid.SelectedItems.Add(row);
+    }
+    private static List<T> Selected<T>(DataGrid grid) => grid.SelectedItems.OfType<T>().ToList();
     private void Refresh()
     {
+        refreshing = true; try { RefreshCore(); } finally { refreshing = false; }
+    }
+    private void RefreshCore()
+    {
         var games = app.Store.Get("games", () => new List<GameInstallation>());
-        GameCount.Text = games.Count(x => x.Present).ToString();
+        GameCount.Text = games.Count(x => x.Present && !x.Removed).ToString();
         var saveStatuses = app.Store.Get("save-statuses", () => new List<SaveStatus>());
         var settingsOnly = saveStatuses.Where(x => x.Status.StartsWith("Settings", StringComparison.Ordinal)).Select(x => x.Name).ToHashSet();
         var attention = games.Where(x => !x.Excluded && (x.Status is "Needs review" or "Missing installation" or "Metadata needs review" || x.SaveTitle == null || settingsOnly.Contains(x.SaveTitle ?? x.Title))).ToList();
         foreach (var game in attention.Where(x => settingsOnly.Contains(x.SaveTitle ?? x.Title))) game.Reason = "Only configuration-like files found; confirm your actual progress save location.";
         AttentionCount.Text = attention.Count.ToString();
-        var selectedId = (GamesGrid.SelectedItem as GameInstallation)?.Id;
-        GamesGrid.ItemsSource = games; GamesGrid.SelectedItem = games.FirstOrDefault(x => x.Id == selectedId); AttentionGrid.ItemsSource = attention;
-        SavesGrid.ItemsSource = app.Store.Get("save-statuses", () => new List<SaveStatus>()); ActivityList.ItemsSource = app.Store.Activities(); StatusText.Text = app.Status;
+        var byName = saveStatuses.GroupBy(x => x.Name).ToDictionary(x => x.Key, x => x.First().Status);
+        foreach (var game in games) game.SaveStatus = game.Removed ? "" : game.Excluded ? "Excluded" : !game.Present ? "" : byName.GetValueOrDefault(game.SaveTitle ?? game.Title, "Not scanned yet");
+        var missing = games.Count(x => !x.Present && !x.Excluded);
+        RemoveMissingButton.Content = $"Remove missing ({missing})…"; RemoveMissingButton.IsEnabled = missing > 0;
+        CompanionNotice.Visibility = app.Store.Get("companion-outdated", () => false) ? Visibility.Visible : Visibility.Collapsed;
+        ProtectedCount.Text = saveStatuses.Count(x => x.Status is "Backed up" or "Unchanged").ToString();
+        Show(GamesGrid, games, x => x.Id, GamesSearch, GamesFilter, x => x.Title + "\n" + x.InstallDirectory, x => ["Playnite: " + x.Status, "Saves: " + x.SaveStatus], x => x.Removed);
+        Show(AttentionGrid, attention, x => x.Id, AttentionSearch, null, x => x.Title + "\n" + x.Reason, _ => []);
+        Show(SavesGrid, saveStatuses, x => x.Name, SavesSearch, SavesFilter, x => x.Name + "\n" + x.Detail, x => [x.Status]);
+        ActivityList.ItemsSource = app.Store.Activities(); StatusText.Text = app.Status;
     }
     public async Task RunAsync(Func<Task> work)
     {
-        if (busy) return; busy = true; Tabs.IsEnabled = false;
+        if (busy) return; busy = true; Tabs.IsHitTestVisible = false; Tabs.Opacity = 0.6; BusyBar.Visibility = CancelButton.Visibility = Visibility.Visible;
         try { await work(); }
         catch (OperationCanceledException) { app.Store.Log("Operation cancelled. For a partially completed restore, use the safety location recorded in Recent activity."); }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Action could not complete", MessageBoxButton.OK, MessageBoxImage.Warning); }
-        finally { busy = false; Tabs.IsEnabled = true; Refresh(); }
+        finally { busy = false; Tabs.IsHitTestVisible = true; Tabs.Opacity = 1; BusyBar.Visibility = CancelButton.Visibility = Visibility.Collapsed; Refresh(); }
     }
     private async void Scan_Click(object sender, RoutedEventArgs e) => await RunAsync(async () => await app.ScanAsync());
     private async void FindSaves_Click(object sender, RoutedEventArgs e) => await RunAsync(async () => await app.PreviewSavesAsync());
@@ -56,7 +87,8 @@ public partial class MainWindow : Window
     private void CancelOperation_Click(object sender, RoutedEventArgs e) => app.CancelCurrentOperation();
     private async void BackupSelected_Click(object sender, RoutedEventArgs e)
     {
-        if (SavesGrid.SelectedItem is SaveStatus save) await RunAsync(async () => await app.BackupAsync([save.Name]));
+        var names = Selected<SaveStatus>(SavesGrid).Select(x => x.Name).ToList();
+        if (names.Count > 0) await RunAsync(async () => await app.BackupAsync(names));
     }
     private void InspectFiles_Click(object sender, RoutedEventArgs e)
     {
@@ -68,21 +100,50 @@ public partial class MainWindow : Window
     private async Task ReviewGameAsync(GameInstallation? game)
     {
         if (game == null) return;
-        var result = EditDialog.Show(this, "Confirm game", [("Game title", game.Title), ("Launch executable", game.Executable), ("Launch arguments", game.Arguments)], "Executable candidates:\n" + string.Join("\n", game.ExecutableCandidates));
+        var result = EditDialog.Show(this, "Confirm game", [("Game title", game.Title), ("Launch executable", game.Executable), ("Launch arguments", game.Arguments)], "Click a candidate to use it as the launch executable. It is also copied to the clipboard.", ("Executable candidates", game.ExecutableCandidates, 1));
         if (result != null) await RunAsync(async () => await app.Exclusive(() => { app.ConfirmGame(game.Id, result[0], result[1], result[2]); return Task.FromResult(true); }));
     }
     private async void Exclude_Click(object sender, RoutedEventArgs e)
     {
-        if (GamesGrid.SelectedItem is GameInstallation game) await RunAsync(async () => await app.Exclusive(() => { app.ExcludeGame(game.Id); return Task.FromResult(true); }));
+        var games = Selected<GameInstallation>(GamesGrid);
+        if (games.Count > 0) await RunAsync(async () => await app.Exclusive(() => { foreach (var game in games) app.ExcludeGame(game.Id); return Task.FromResult(true); }));
+    }
+    private async void RemoveMissing_Click(object sender, RoutedEventArgs e)
+    {
+        var missing = app.Games.Where(x => !x.Present && !x.Excluded).Select(x => x.Title).ToList();
+        if (missing.Count == 0 || MessageBox.Show(this, "Remove these games from the list? Their installation folder was not found in the last scan. Existing backups and Playnite entries are not touched.\n\n" + string.Join("\n", missing), "Remove missing games", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        await RunAsync(async () => await app.Exclusive(() => Task.FromResult(app.RemoveMissingGames())));
+    }
+    private async void LocateSaves_Click(object sender, RoutedEventArgs e) => await RunAsync(async () =>
+    {
+        var found = await Task.Run(app.LocateUnknownSaves);
+        if (found.Count == 0) { MessageBox.Show(this, "No folders matching your unknown games were found in Documents, Saved Games or AppData. Use Add save location for those games.", "Locate unknown saves"); return; }
+        var summary = string.Join("\n", found.Select(x => x.Key + "\n" + string.Join("\n", x.Value.Select(p => "    " + p))));
+        if (EditDialog.Show(this, $"Save folders found for {found.Count} games", [("Folders to back up (remove any that are wrong)", summary)], "These folders have the same name as the game or its program. Confirm to add them as save locations and back them up now. They may include settings as well as progress.") is not { } result) return;
+        // Read the list back so removed lines are respected: a title line followed by its indented folders.
+        var rules = new List<SaveRule>();
+        foreach (var line in result[0].Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            if (!char.IsWhiteSpace(line[0])) rules.Add(new() { Name = line.Trim() }); else if (rules.Count > 0) rules[^1].Files.Add(line.Trim());
+        rules.RemoveAll(x => x.Files.Count == 0 || !found.ContainsKey(x.Name));
+        if (rules.Count == 0) return;
+        await app.Exclusive(() => { foreach (var rule in rules) app.SaveRule(rule); return Task.FromResult(true); });
+        await app.BackupAsync(rules.Select(x => x.Name));
+    });
+    private async void RemoveGame_Click(object sender, RoutedEventArgs e)
+    {
+        var games = Selected<GameInstallation>(GamesGrid); if (games.Count == 0) return;
+        if (MessageBox.Show(this, (games.Count == 1 ? "Remove \"" + games[0].Title + "\" from Game Save Manager?" : $"Remove these {games.Count} games from Game Save Manager?\n\n" + string.Join("\n", games.Select(x => x.Title))) + "\n\nIt will no longer be listed, scanned, backed up or sent to Playnite. The games, their saves and existing backups are not deleted.\n\nTo bring one back later, pick \"Playnite: Removed\" in the status filter and use Review game.", "Remove game", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        await RunAsync(async () => await app.Exclusive(() => { foreach (var game in games) app.RemoveGame(game.Id); return Task.FromResult(true); }));
     }
     private async void RetryMetadata_Click(object sender, RoutedEventArgs e)
     {
-        if (GamesGrid.SelectedItem is not GameInstallation game || game.PlayniteId == null) return;
+        if (GamesGrid.SelectedItem is not GameInstallation game) return;
+        if (game.PlayniteId == null) { MessageBox.Show(this, "This game is not in Playnite yet. Confirm it with Review game, then open Playnite so it can be imported.", "Retry metadata"); return; }
         await RunAsync(async () => await app.Exclusive(() => { app.Store.Set("pending-metadata", new LibraryGame { Id = game.PlayniteId, SourceId = game.Id, Name = game.Title }); return Task.FromResult(true); }));
     }
     private async void AddRule_Click(object sender, RoutedEventArgs e)
     {
-        var selected = (SavesGrid.SelectedItem as SaveStatus)?.Name ?? (AttentionGrid.SelectedItem as GameInstallation)?.Title ?? "";
+        var selected = (Tabs.SelectedIndex == 2 ? (AttentionGrid.SelectedItem as GameInstallation)?.Title : (SavesGrid.SelectedItem as SaveStatus)?.Name) ?? "";
         var old = app.Rules.FirstOrDefault(x => x.Name == selected);
         var suggestions = SuggestLocations(selected);
         var result = EditDialog.Show(this, "Confirm save location", [("Game name", selected), ("Save files or folders — one per line", string.Join("\n", old?.Files ?? [])), ("Registry keys — optional, one per line", string.Join("\n", old?.Registry ?? []))], "Confirm only locations that contain this game's saves.\nPossible folders (not verified):\n" + string.Join("\n", suggestions));
@@ -120,7 +181,11 @@ public partial class MainWindow : Window
         ((App)System.Windows.Application.Current).ApplyStartupSetting(); RepositoryPath.Text = app.Backups.Repository;
         app.Store.Log("Settings saved."); return Task.FromResult(true);
     }));
-    private void OpenBackups_Click(object sender, RoutedEventArgs e) { if (Directory.Exists(app.Settings.BackupDirectory)) Process.Start(new ProcessStartInfo(app.Settings.BackupDirectory) { UseShellExecute = true }); }
+    private void OpenBackups_Click(object sender, RoutedEventArgs e)
+    {
+        if (Directory.Exists(app.Settings.BackupDirectory)) Process.Start(new ProcessStartInfo(app.Settings.BackupDirectory) { UseShellExecute = true });
+        else MessageBox.Show(this, "The backup folder does not exist yet:\n" + app.Settings.BackupDirectory + "\n\nCheck it in Settings and choose Save settings.", "Open backup folder");
+    }
     private async void Export_Click(object sender, RoutedEventArgs e)
     {
         var picker = new SaveFileDialog { Filter = "JSON coverage report|*.json", FileName = "game-save-coverage.json" };
@@ -165,7 +230,7 @@ public partial class MainWindow : Window
                 previewJson = await app.Backups.RestorePreviewAsync(RepositoryPath.Text, version, app.OperationToken); previewIdentity = PreviewIdentity(version);
                 using var document = JsonDocument.Parse(previewJson);
                 var statuses = Ludusavi.ParseStatuses(document, true);
-                RestorePreview.Text = string.Join("\n", statuses.SelectMany(x => new[] { x.Name, "Files to restore:" }.Concat(x.Files).Concat(["Registry keys:"]).Concat(x.Registry)));
+                RestorePreview.Text = string.Join("\n", statuses.SelectMany(x => new[] { x.Name, "Files to restore:" }.Concat(x.Files).Concat(["Registry keys:"]).Concat(x.Registry))); RestoreButton.IsEnabled = true;
             }
             finally { app.ConfigureEngine(); }
             return true;
@@ -178,7 +243,7 @@ public partial class MainWindow : Window
         await RunAsync(async () => await app.Exclusive(async () =>
         {
             app.ConfigureEngine(ReadMappings());
-            try { await app.Backups.RestoreAsync(RepositoryPath.Text, version, previewJson, app.RunningTitles(), app.OperationToken); RestorePreview.Text = "Restore completed. See Recent activity for the safety backup location."; previewJson = null; }
+            try { await app.Backups.RestoreAsync(RepositoryPath.Text, version, previewJson, app.RunningTitles(), app.OperationToken); RestorePreview.Text = "Restore completed. See Recent activity for the safety backup location."; previewJson = null; RestoreButton.IsEnabled = false; }
             finally { app.ConfigureEngine(); }
             return true;
         }));
@@ -198,7 +263,7 @@ public partial class MainWindow : Window
         var picker = new OpenFileDialog { Filter = "Playnite package|PlayniteBackup-*.zip" };
         if (picker.ShowDialog(this) != true) return;
         if (MessageBox.Show(this, "Replace the current Playnite library and settings with this package? A safety package will be created first. Playnite will restart.", "Restore Playnite", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
-        await RunAsync(async () => await app.Exclusive(async () => { await new MigrationService(app).RestorePlayniteAsync(picker.FileName); return true; }));
+        await RunAsync(async () => await app.Exclusive(async () => { await new MigrationService(app).RestorePlayniteAsync(picker.FileName, app.OperationToken); return true; }));
     }
     private async void ImportRules_Click(object sender, RoutedEventArgs e)
     {
@@ -254,21 +319,48 @@ public partial class MainWindow : Window
 
 internal static class EditDialog
 {
-    public static string[]? Show(Window owner, string title, (string Label, string Value)[] fields, string explanation)
+    public static string[]? Show(Window owner, string title, (string Label, string Value)[] fields, string explanation, (string Label, List<string> Items, int Field)? picks = null)
     {
         var window = new Window { Owner = owner, Title = title, Width = 760, Height = 640, WindowStartupLocation = WindowStartupLocation.CenterOwner };
-        var panel = new StackPanel { Margin = new Thickness(24) }; panel.Children.Add(new TextBlock { Text = title, FontSize = 24, Margin = new Thickness(0, 0, 0, 16) });
+        window.Background = owner.Background; window.Foreground = owner.Foreground; window.FontSize = owner.FontSize;
+        var panel = new StackPanel { Margin = new Thickness(24) }; panel.Children.Add(new TextBlock { Text = title, FontSize = 24, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 16) });
         var inputs = new List<TextBox>();
         foreach (var field in fields)
         {
-            panel.Children.Add(new TextBlock { Text = field.Label });
-            var input = new TextBox { Text = field.Value, AcceptsReturn = field.Label.Contains("line"), MinHeight = field.Label.Contains("line") ? 75 : 40, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            panel.Children.Add(new TextBlock { Text = field.Label, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) });
+            var input = new TextBox { Text = field.Value, AcceptsReturn = field.Label.Contains("line"), MinHeight = field.Label.Contains("line") ? 75 : 40, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Margin = new Thickness(0, 0, 0, 16) };
             inputs.Add(input); panel.Children.Add(input);
         }
+        if (picks is { Items.Count: > 0 } pick)
+        {
+            // Clicking an item fills the given field and copies it, so paths never need retyping.
+            panel.Children.Add(new TextBlock { Text = pick.Label, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) });
+            var list = new ListBox { ItemsSource = pick.Items, MaxHeight = 180, SelectedItem = pick.Items.FirstOrDefault(x => x == inputs[pick.Field].Text) };
+            list.SelectionChanged += (_, _) =>
+            {
+                if (list.SelectedItem is not string value) return;
+                inputs[pick.Field].Text = value;
+                try { Clipboard.SetText(value); } catch (System.Runtime.InteropServices.ExternalException) { } // clipboard held by another program
+            };
+            panel.Children.Add(list);
+        }
         panel.Children.Add(new TextBlock { Text = explanation, Foreground = new SolidColorBrush(Color.FromRgb(159, 180, 189)), Margin = new Thickness(0, 8, 0, 20) });
-        var buttons = new WrapPanel(); var save = new Button { Content = "Confirm", IsDefault = true }; var cancel = new Button { Content = "Cancel", IsCancel = true };
+        var buttons = new WrapPanel(); var save = new Button { Content = fields.Length == 0 ? "Close" : "Confirm", IsDefault = true, Margin = new Thickness(0, 0, 8, 0), Style = (Style)owner.FindResource("Primary") }; var cancel = new Button { Content = "Cancel", IsCancel = true, Visibility = fields.Length == 0 ? Visibility.Collapsed : Visibility.Visible };
         save.Click += (_, _) => { window.DialogResult = true; window.Close(); }; buttons.Children.Add(save); buttons.Children.Add(cancel); panel.Children.Add(buttons);
         window.Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         return window.ShowDialog() == true ? inputs.Select(x => x.Text).ToArray() : null;
     }
+}
+
+internal sealed class StatusBrush : IValueConverter
+{
+    private static readonly Brush Good = new SolidColorBrush(Color.FromRgb(0x6C, 0xCB, 0x8E)), Warn = new SolidColorBrush(Color.FromRgb(0xE3, 0xBC, 0x7A)), Bad = new SolidColorBrush(Color.FromRgb(0xE5, 0x73, 0x73)), Idle = new SolidColorBrush(Color.FromRgb(0x6B, 0x78, 0x7E));
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) => (value as string) switch
+    {
+        "In Playnite" or "Backed up" or "Unchanged" => Good,
+        "Failed" or "Missing installation" => Bad,
+        "Excluded" or "Removed" or "No saves found" or "Unknown location" => Idle,
+        _ => Warn // review, waiting, queued, deferred, ready, settings-only
+    };
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotSupportedException();
 }

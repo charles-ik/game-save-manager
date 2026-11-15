@@ -39,6 +39,7 @@ public sealed class AppController : IDisposable
         }
         Store.Set("settings", Settings);
         Games = Store.Get("games", () => new List<GameInstallation>()); Rules = Store.Get("rules", () => new List<SaveRule>());
+        Saves = Store.Get("save-statuses", () => new List<SaveStatus>());
         var runner = new ProcessRunner();
         Engine = new(Settings, Path.Combine(stateDirectory, "engine-config"), runner);
         Backups = new(Settings, Store, Engine, runner); Backups.Progress += SetStatus;
@@ -75,19 +76,23 @@ public sealed class AppController : IDisposable
             else
             {
                 old.Present = true; old.ExecutableCandidates = game.ExecutableCandidates; old.LastChangeUtc = game.LastChangeUtc;
-                if (!old.Confirmed && !old.Excluded) { old.Executable = game.Executable; old.Status = game.Status; old.Reason = game.Reason; }
+                if (!old.Confirmed && !old.Excluded) { old.Executable = game.Executable; if (old.PlayniteId == null) { old.Status = game.Status; old.Reason = game.Reason; } }
+                MarkInPlaynite(old);
+                if (old.Confirmed && old.Status == "Missing installation") old.Status = old.PlayniteId == null ? "Queued for Playnite" : "In Playnite";
                 if (old.Confirmed && !File.Exists(old.Executable)) { old.Status = "Needs review"; old.Reason = "The confirmed executable is missing."; }
             }
         }
-        foreach (var missing in Games.Where(x => !x.Present && !x.Excluded)) missing.Status = "Missing installation";
+        Games.RemoveAll(x => x.Removed && !x.Present); // its folder is gone, so there is nothing left to hide
+        foreach (var missing in Games.Where(x => !x.Present && !x.Excluded)) { missing.Status = "Missing installation"; missing.Reason = "The installation folder was not found in the last scan."; }
         if (changedAt > DateTimeOffset.UtcNow.AddMinutes(-2))
-            foreach (var waiting in Games.Where(x => x.Present && !x.Confirmed && !x.Excluded))
+            foreach (var waiting in Games.Where(x => x.Present && !x.Confirmed && !x.Excluded && x.PlayniteId == null))
             { waiting.Status = "Waiting for files"; waiting.Reason = "Waiting for two minutes without changes in watched folders."; }
         ConfigureEngine();
         await RefreshManifestInternalAsync();
         foreach (var game in Games.Where(x => x.Present && !x.Excluded && x.SaveTitle == null))
         {
-            var matched = await Engine.ExactTitleAsync(game.Title, OperationToken);
+            string? matched = null;
+            foreach (var name in SaveLocator.Names(game)) if ((matched = await Engine.ExactTitleAsync(name, OperationToken)) != null) break;
             game.SaveTitle = matched;
             if (matched != null && game.Status != "Waiting for files" && Discovery.ExecutableSupportsTitle(game))
             {
@@ -131,16 +136,50 @@ public sealed class AppController : IDisposable
     }
     public Task<List<SaveStatus>> BackupAsync(IEnumerable<string>? names = null) => Exclusive(async () =>
     {
-        ConfigureEngine(); await RefreshManifestInternalAsync(); Saves = await Backups.BackUpAsync(RunningTitles(), names, OperationToken);
+        ConfigureEngine(); await RefreshManifestInternalAsync(); var selected = names?.ToList();
+        if (selected != null)
+        {
+            var known = new List<string>();
+            foreach (var name in selected) if (Games.Any(x => x.SaveTitle == name) || Rules.Any(x => x.Name == name) || await Engine.ExactTitleAsync(name, OperationToken) == name) known.Add(name);
+            foreach (var name in selected.Except(known)) Store.Log("No known save location for " + name + "; nothing was backed up for it.");
+            if (known.Count == 0) { SetStatus("No known save location for the selected game."); return Saves; }
+            selected = known;
+        }
+        var results = await Backups.BackUpAsync(RunningTitles(), selected, OperationToken);
+        Saves = selected == null ? results : MergeStatuses(Saves, results);
         AddCoverageGaps(); SetStatus("Backup pass finished. Cloud sync unverified."); return Saves;
     });
+    public static List<SaveStatus> MergeStatuses(List<SaveStatus> known, List<SaveStatus> updated) => known.Where(x => updated.All(u => u.Name != x.Name)).Concat(updated).ToList();
+    /// <summary>A game already in the Playnite library has nothing left to review, whether or not this app imported it.</summary>
+    private static void MarkInPlaynite(GameInstallation game)
+    {
+        if (game.PlayniteId == null || !game.Present || game.Excluded || game.Status is not ("Needs review" or "Waiting for files" or "Queued for Playnite" or "Missing installation")) return;
+        if (game.Confirmed && !File.Exists(game.Executable)) return; // the confirmed launch file is gone: still worth a look
+        game.Status = "In Playnite"; game.Reason = "Already in your Playnite library.";
+    }
     public void ConfirmGame(string id, string title, string executable, string arguments)
     {
         if (string.IsNullOrWhiteSpace(title) || !File.Exists(executable) || !executable.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Enter a title and select an existing game executable.");
         var game = Games.Single(x => x.Id == id);
         if (game.Title != title) game.SaveTitle = null;
-        game.Title = title.Trim(); game.Executable = Paths.Canonical(executable); game.Arguments = arguments; game.Confirmed = true; game.Excluded = false;
+        game.Title = title.Trim(); game.Executable = Paths.Canonical(executable); game.Arguments = arguments; game.Confirmed = true; game.Excluded = game.Removed = false; game.MetadataWanted = game.PlayniteId != null;
         game.Status = game.PlayniteId == null ? "Queued for Playnite" : "In Playnite"; game.Reason = "Confirmed by you."; PersistGames();
+    }
+    public int RemoveMissingGames()
+    {
+        var removed = Games.RemoveAll(x => !x.Present && !x.Excluded);
+        PersistGames(); ConfigureEngine(); Store.Log($"Removed {removed} games whose installation is missing."); return removed;
+    }
+    /// <summary>Likely save folders for games with no database match and no custom rule, keyed by game title.</summary>
+    public Dictionary<string, List<string>> LocateUnknownSaves() =>
+        SaveLocator.Locate(Games.Where(x => x.Present && !x.Excluded && x.SaveTitle == null), SaveLocator.DefaultRoots())
+            .ToDictionary(x => x.Key, x => x.Value.Where(p => !Paths.Within(p, Settings.BackupDirectory) && !Paths.Within(Settings.BackupDirectory, p) && !Paths.Within(Store.DirectoryPath, p)).ToList())
+            .Where(x => x.Value.Count > 0).ToDictionary(x => x.Key, x => x.Value);
+    public void RemoveGame(string id)
+    {
+        var game = Games.Single(x => x.Id == id); game.Excluded = game.Removed = true; game.Status = "Removed"; game.Reason = "Removed by you.";
+        Saves.RemoveAll(x => x.Name == (game.SaveTitle ?? game.Title) && !Games.Any(other => other != game && !other.Excluded && (other.SaveTitle ?? other.Title) == x.Name));
+        PersistGames(); ConfigureEngine(); Store.Log("Removed from Game Save Manager: " + game.Title);
     }
     public void ExcludeGame(string id) { var game = Games.Single(x => x.Id == id); game.Excluded = true; game.Status = "Excluded"; PersistGames(); }
     public void SaveRule(SaveRule rule)
@@ -179,7 +218,7 @@ public sealed class AppController : IDisposable
             foreach (var game in snapshot.Where(x => x.IsRunning)) running.Add(Games.FirstOrDefault(x => x.PlayniteId == game.Id)?.SaveTitle ?? game.Name);
         return running;
     }
-    private async Task<BridgeMessage> HandleBridgeAsync(BridgeMessage request)
+    public async Task<BridgeMessage> HandleBridgeAsync(BridgeMessage request)
     {
         return await Exclusive(() =>
         {
@@ -193,12 +232,22 @@ public sealed class AppController : IDisposable
                 foreach (var game in Games.Where(x => x.PlayniteId == null))
                 {
                     var match = request.Games.FirstOrDefault(x => x.InstallDirectory.Length > 0 && Paths.Equal(x.InstallDirectory, game.InstallDirectory) || x.Executable.Length > 0 && game.Executable.Length > 0 && Paths.Equal(x.Executable, game.Executable));
-                    if (match != null) { game.PlayniteId = match.Id; game.Status = "In Playnite"; }
+                    if (match != null) { game.PlayniteId = match.Id; if (!game.Excluded) game.Status = "In Playnite"; }
                 }
+                foreach (var game in Games) MarkInPlaynite(game);
                 PersistGames();
                 var remap = Store.Get("pending-remap", () => new List<LibraryGame>());
                 if (remap.Count > 0) return Task.FromResult(new BridgeMessage { Kind = "remap", Games = remap });
+                Store.Set("companion-outdated", request.Companion < 2);
+                // Once the fixed companion connects, retry the downloads the old one failed. Once only, so a repeat failure cannot loop.
+                if (request.Companion >= 2 && !Store.Get("metadata-retried", () => false))
+                {
+                    foreach (var game in Games.Where(x => x.Status == "Metadata needs review" && x.Reason.StartsWith("Value cannot be null", StringComparison.Ordinal))) game.MetadataWanted = true;
+                    Store.Set("metadata-retried", true); PersistGames();
+                }
                 var metadata = Store.Get<LibraryGame?>("pending-metadata", () => null);
+                if (metadata == null && Games.FirstOrDefault(x => x.MetadataWanted && x.PlayniteId != null && !x.Excluded) is { } wanted)
+                { metadata = new LibraryGame { Id = wanted.PlayniteId!, SourceId = wanted.Id, Name = wanted.Title }; Store.Set<LibraryGame?>("pending-metadata", metadata); }
                 if (metadata != null) return Task.FromResult(new BridgeMessage { Kind = "metadata", Game = metadata });
                 var pending = Settings.AutomationEnabled ? Games.FirstOrDefault(x => x.Confirmed && x.Present && !x.Excluded && x.PlayniteId == null && x.Status == "Queued for Playnite" && File.Exists(x.Executable)) : null;
                 if (pending != null) return Task.FromResult(new BridgeMessage { Kind = "import", Game = new() { SourceId = pending.Id, Name = pending.Title, InstallDirectory = pending.InstallDirectory, Executable = pending.Executable, Arguments = pending.Arguments } });
@@ -217,6 +266,7 @@ public sealed class AppController : IDisposable
                 var game = Games.FirstOrDefault(x => x.Id == request.Game.SourceId || x.PlayniteId == request.Game.Id);
                 if (game != null)
                 {
+                    game.MetadataWanted = false;
                     game.Reason = request.Error.Length == 0 ? "Metadata downloaded." : request.Error;
                     game.Status = request.Error.Length == 0 ? "In Playnite" : request.Kind == "importFailed" ? "Needs review" : "Metadata needs review";
                     PersistGames();

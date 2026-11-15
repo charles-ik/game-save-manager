@@ -57,7 +57,7 @@ public sealed class Companion : GenericPlugin
             var snapshot = PlayniteApi.MainView.UIDispatcher.Invoke(() => PlayniteApi.Database.Games.Select(ConvertGame).ToList());
             var response = await ExchangeAsync(new BridgeMessage
             {
-                Kind = "poll", Games = snapshot, DataDirectory = PlayniteApi.Paths.ConfigurationPath,
+                Kind = "poll", Companion = 2, Games = snapshot, DataDirectory = PlayniteApi.Paths.ConfigurationPath,
                 LibraryDirectory = PlayniteApi.Database.DatabasePath,
                 Executable = Path.Combine(PlayniteApi.Paths.ApplicationPath, "Playnite.DesktopApp.exe")
             });
@@ -172,7 +172,7 @@ public sealed class Companion : GenericPlugin
         if (extension.Length == 0 || extension.Length > 8) extension = ".png";
         var path = Path.Combine(GetPluginUserDataPath(), Guid.NewGuid().ToString("N") + extension);
         Directory.CreateDirectory(GetPluginUserDataPath());
-        if (image.HasImageData) File.WriteAllBytes(path, image.Content);
+        if (image.Content != null) File.WriteAllBytes(path, image.Content);
         else if (Uri.TryCreate(image.Path, UriKind.Absolute, out var uri) && (uri.Scheme == "https" || uri.Scheme == "http"))
         { using var client = new System.Net.WebClient(); client.DownloadFile(uri, path); }
         else File.Copy(image.Path, path);
@@ -180,7 +180,7 @@ public sealed class Companion : GenericPlugin
     }
     private string AddImage(MetadataFile image, Guid gameId)
     {
-        if (!image.HasImageData) return PlayniteApi.Database.AddFile(image.Path, gameId);
+        if (image.Content == null) return PlayniteApi.Database.AddFile(image.Path, gameId);
         var temporary = Path.Combine(GetPluginUserDataPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(image.FileName));
         Directory.CreateDirectory(GetPluginUserDataPath());
         try { File.WriteAllBytes(temporary, image.Content); return PlayniteApi.Database.AddFile(temporary, gameId); }

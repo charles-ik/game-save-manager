@@ -74,11 +74,14 @@ public sealed class Ludusavi(AppSettings settings, string configDirectory, IProc
     {
         try
         {
-            using var response = await RunJsonAsync(["find", "--api", "--multiple", "--normalized", "--", title], ct);
-            if (response.RootElement.TryGetProperty("games", out var games) && games.EnumerateObject().Count() == 1)
+            // The strict lookup misses punctuation differences ("2 0" vs "2.0", "and" vs "&"); the fuzzy one finds
+            // them, and the key comparison keeps only a candidate that is the same title.
+            foreach (var mode in new[] { "--normalized", "--fuzzy" })
             {
-                var candidate = games.EnumerateObject().First().Name;
-                if (Discovery.TitleKey(candidate) == Discovery.TitleKey(title)) return candidate;
+                using var response = await RunJsonAsync(["find", "--api", "--multiple", mode, "--", title], ct);
+                if (!response.RootElement.TryGetProperty("games", out var games)) continue;
+                var candidate = games.EnumerateObject().Select(x => x.Name).FirstOrDefault(x => Discovery.TitleKey(x) == Discovery.TitleKey(title));
+                if (candidate != null) return candidate;
             }
         }
         catch (IOException) { }

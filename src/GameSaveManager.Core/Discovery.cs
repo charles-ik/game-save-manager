@@ -9,7 +9,7 @@ public sealed class Discovery
     { "redist", "_redist", "_commonredist", "redistributables", "support", "__installer", "installer", "directx", "dotnet", ".git", "node_modules", "shortcuts", "tools", "mod uploader", "mod-uploader", "model_editor", "resources", "engine" };
     private static readonly HashSet<string> BinaryDirectories = new(StringComparer.OrdinalIgnoreCase)
     { "bin", "bin64", "binaries", "win64", "win32", "x64", "x86", "release", "retail", "game", "app" };
-    private static readonly Regex NonGame = new(@"^(unins.*|uninstall.*|setup.*|install.*|vcredist.*|vc_redist.*|dxsetup.*|crash.*|unitycrash.*|ue4prereq.*|dotnet.*|cef.*|notification_helper|unrealCEFSubProcess)$", RegexOptions.IgnoreCase);
+    private static readonly Regex NonGame = new(@"^(unins.*|uninstall.*|setup.*|.*[ _-]setup|install.*|vcredist.*|vc_redist.*|dxsetup.*|crash.*|unitycrash.*|ue4prereq.*|dotnet.*|cef.*|notification_helper|unrealCEFSubProcess)$", RegexOptions.IgnoreCase);
 
     public static string NormalizeTitle(string value)
     {
@@ -17,7 +17,7 @@ public sealed class Discovery
         value = Regex.Replace(value, @"(?i)[. _-]+(?:incl[. _]+)?all[. _]+dlcs?$", "");
         return Regex.Replace(value.Replace('.', ' ').Replace('_', ' '), @"\s+", " ").Trim(' ', '-');
     }
-    public static string TitleKey(string value) => Regex.Replace(NormalizeTitle(value), @"[^\p{L}\p{N}]", "").ToLowerInvariant();
+    public static string TitleKey(string value) => Regex.Replace(NormalizeTitle(value).Replace("&", "and"), @"[^\p{L}\p{N}]", "").ToLowerInvariant();
 
     public List<GameInstallation> Scan(IEnumerable<string> configuredRoots, Action<string> warning, CancellationToken cancellationToken = default)
     {

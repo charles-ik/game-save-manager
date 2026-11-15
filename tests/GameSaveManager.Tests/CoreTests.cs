@@ -212,6 +212,41 @@ public sealed class CoreTests
         Assert.Equal("Settings backed up; saves unverified", Assert.Single(Ludusavi.ParseStatuses(data, false)).Status);
     }
     [Fact]
+    public void PartialBackupKeepsOtherGamesStatuses()
+    {
+        var merged = AppController.MergeStatuses([new() { Name = "A", Status = "Backed up" }, new() { Name = "B", Status = "Ready to back up" }], [new() { Name = "B", Status = "Backed up" }]);
+        Assert.Equal(["A:Backed up", "B:Backed up"], merged.Select(x => x.Name + ":" + x.Status));
+    }
+    [Fact]
+    public void UnknownSavesAreLocatedByFolderNameButNotByGenericPrograms()
+    {
+        using var work = new TestWorkspace();
+        var expected = Path.GetFullPath(work.Folder("AppData/Studio/Taxi Life")); work.Folder("AppData/Other/Launcher"); work.Folder("AppData/Taxi Life Soundtrack");
+        var game = new GameInstallation { Title = "Taxi.Sim.v2", InstallDirectory = work.Folder("Games/Taxi"), ExecutableCandidates = [@"C:\x\TaxiLife-Win64-Shipping.exe", @"C:\x\Launcher.exe"] };
+        var found = SaveLocator.Locate([game], [work.Folder("AppData")]);
+        Assert.Equal([expected], Assert.Single(found).Value);
+        Assert.Equal(Discovery.TitleKey("Mount & Blade: Warband"), Discovery.TitleKey("Mount and Blade Warband"));
+    }
+    [Fact]
+    public async Task GamesAlreadyInPlayniteAreNotFlaggedForReviewAgain()
+    {
+        using var work = new TestWorkspace(); work.FileAt("Games/Known/known.exe", "fixture"); work.FileAt("Games/Fresh/fresh.exe", "fixture");
+        using var app = new AppController(work.Folder("state"));
+        app.Settings.Roots = [work.Folder("Games")]; app.Settings.EnginePath = "missing.exe"; app.Settings.LastManifestUpdate = DateTimeOffset.UtcNow;
+        await app.ScanAsync(); app.Games.Single(x => x.Title == "Known").PlayniteId = "library-id";
+        await app.ScanAsync();
+        Assert.Equal("In Playnite", app.Games.Single(x => x.Title == "Known").Status);
+        Assert.NotEqual("In Playnite", app.Games.Single(x => x.Title == "Fresh").Status);
+        // Reviewing a game that is already in Playnite queues one metadata download.
+        var known = app.Games.Single(x => x.Title == "Known"); app.ConfirmGame(known.Id, "Known", known.ExecutableCandidates[0], "");
+        var poll = new GameSaveManager.Contracts.BridgeMessage { Kind = "poll", Companion = 2 };
+        var reply = await app.HandleBridgeAsync(poll); Assert.Equal("metadata", reply.Kind); Assert.Equal("library-id", reply.Game!.Id);
+        await app.HandleBridgeAsync(new() { Kind = "metadataUpdated", Game = reply.Game });
+        Assert.Equal("ok", (await app.HandleBridgeAsync(poll)).Kind);
+        app.RemoveGame(app.Games.Single(x => x.Title == "Fresh").Id); await app.ScanAsync();
+        var removed = app.Games.Single(x => x.Title == "Fresh"); Assert.True(removed.Removed && removed.Excluded); Assert.Equal("Removed", removed.Status);
+    }
+    [Fact]
     public void UnsafeArchiveIsRejected()
     {
         using var work = new TestWorkspace(); var folder = work.Folder("repo");

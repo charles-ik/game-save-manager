@@ -39,7 +39,7 @@ public sealed class StateStore
     {
         using var c = Open(); using var q = c.CreateCommand(); q.CommandText = "SELECT timestamp,message FROM activity ORDER BY id DESC LIMIT 100";
         using var reader = q.ExecuteReader(); var list = new List<Activity>();
-        while (reader.Read()) list.Add(new(DateTimeOffset.Parse(reader.GetString(0)), reader.GetString(1)));
+        while (reader.Read()) list.Add(new(DateTimeOffset.Parse(reader.GetString(0)).ToLocalTime(), reader.GetString(1)));
         return list;
     }
 }

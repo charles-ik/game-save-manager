@@ -3,6 +3,8 @@ namespace GameSaveManager.Contracts;
 public sealed class BridgeMessage
 {
     public int Version { get; set; } = 1;
+    /// <summary>Companion build, sent with each poll. 2 = metadata downloads work for URL-only images.</summary>
+    public int Companion { get; set; }
     public string RequestId { get; set; } = Guid.NewGuid().ToString("N");
     public string Kind { get; set; } = "";
     public string Error { get; set; } = "";
